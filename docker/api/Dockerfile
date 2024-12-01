@@ -1,17 +1,20 @@
-# Use an official Python runtime as a parent image
-FROM python:3.7-slim
+# Use an official Python image
+FROM python:3.12-slim
 
-# Set the working directory to /app
+# Set working directory
 WORKDIR /app
 
-# Copy the current directory contents into the container at /app
-ADD . /app
+# Copy dependencies file
+COPY requirements.txt .
 
-# Install any needed packages specified in requirements.txt
-RUN pip install -r requirements.txt
+# Install dependencies
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Make port 5000 available to the world outside this container
+# Copy the app code
+COPY . .
+
+# Expose the port FastAPI runs on
 EXPOSE 5000
 
-# Run ingestion.py when the container launches
-CMD ["python", "-u","movielens-app.py"]
+# Run the FastAPI application
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5000", "--reload"]

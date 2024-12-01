@@ -18,12 +18,10 @@ Load MovieLens dataset into Neo4j and provide an API to retrieve data.
 
 ## Requirements
 
- * python 3.7
- * py2neo
+ * python 3.12
+ * fastapi
+ * uvicorn
  * neo4j
- * flask
- * swagger
- * connexion
 
 ## Project structure
 

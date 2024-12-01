@@ -1,189 +1,174 @@
 import csv
-from py2neo import Graph, Node
 import os
 import time
+from pathlib import Path
+from neo4j import GraphDatabase
 
-# wait for Neo4j in Docker
+# Wait for Neo4j to be ready in Docker
 time.sleep(15)
 
+# Paths
+DATA_PATH = Path("data/")
+MOVIE_PATH = DATA_PATH / "movies.csv"
+RATINGS_PATH = DATA_PATH / "ratings.csv"
+LINKS_PATH = DATA_PATH / "ratings.csv"
+TAGS_PATH = DATA_PATH / "tags.csv"
+
+# Neo4j connection settings
+HOST = os.environ.get("NEO4J_HOST", "localhost")
+PORT = 7687
+USER = "neo4j"
+PASS = "8769005670"  # default
+
+# Number of rows to process (limits for testing purposes)
 N_MOVIES = 1000
 N_RATINGS = 1000
 N_TAGS = 1000
 N_LINKS = 1000
 
-# NEO4J_HOST will be provided by Docker, otherwise localhost
 
-HOST = os.environ.get("NEO4J_HOST", "localhost")
-PORT = 7687
-USER = "neo4j"
-PASS = "neo4j" #default
+class Neo4jIngestion:
+    def __init__(self, uri, user, password):
+        self.driver = GraphDatabase.driver(uri, auth=(user, password))
 
-graph = Graph("bolt://" + HOST + ":7687", auth=(USER, PASS))
+    def close(self):
+        self.driver.close()
 
-def main():
+    def create_genre_nodes(self):
+        genres = ["Action", "Adventure", "Animation", "Children's", "Comedy", "Crime",
+                  "Documentary", "Drama", "Fantasy", "Film-Noir", "Horror", "Musical",
+                  "Mystery", "Romance", "Sci-Fi", "Thriller", "War", "Western"]
 
-    createGenreNodes()
+        with self.driver.session() as session:
+            for genre in genres:
+                session.run("MERGE (g:Genre {name: $name})", name=genre)
 
-    print("Step 1 out of 4: loading movie nodes")
-    loadMovies()
+    def load_movies(self):
+        with open(MOVIE_PATH) as csvfile:
+            reader = csv.reader(csvfile)
+            next(reader, None)  # Skip header
+            for i, row in enumerate(reader):
+                self.create_movie_node(row)
+                self.create_genre_relationships(row)
 
-    print("Step 2 out of 4: loading rating relationships")
-    loadRatings()
+                if i % 1000 == 0:
+                    print(f"{i}/{N_MOVIES} Movie nodes created")
+                if i >= N_MOVIES:
+                    break
 
-    print("Step 3 out of 4: loading tag relationships")
-    loadTags()
-
-    print("Step 4 out of 4: updating links to movie nodes")
-    loadLinks()
-
-def createGenreNodes():
-    allGenres = ["Action", "Adventure", "Animation", "Children's", "Comedy", "Crime",
-                 "Documentary", "Drama", "Fantasy", "Film-Noir", "Horror", "Musical",
-                 "Mystery", "Romance", "Sci-Fi", "Thriller", "War", "Western"]
-
-    for genre in allGenres:
-        gen = Node("Genre", name=genre)
-        graph.create(gen)
-
-
-def loadMovies():
-    with open('data/movies.csv') as csvfile:
-        readCSV = csv.reader(csvfile, delimiter=',')
-        next(readCSV, None)  # skip header
-        for i, row in enumerate(readCSV):
-
-            createMovieNodes(row)
-            createGenreMovieRelationships(row)
-
-            if (i % 100 == 0):
-                print(f"{i}/{N_MOVIES} Movie nodes created")
-
-            # break after N_MOVIES movies
-
-            if i >= N_MOVIES:
-                break
-
-def createMovieNodes(row):
-    movieData = parseRowMovie(row)
-    id = movieData[0]
-    title = movieData[1]
-    year = movieData[2]
-    mov = Node("Movie", id=id, title=title, year=year)
-    graph.create(mov)
-
-def parseRowMovie(row):
-        id = row[0]
-        year = row[1][-5:-1]
+    def create_movie_node(self, row):
+        movie_id = row[0]
         title = row[1][:-7]
+        year = row[1][-5:-1]
+        with self.driver.session() as session:
+            session.run(
+                "MERGE (m:Movie {id: $id, title: $title, year: $year})",
+                id=movie_id, title=title, year=year
+            )
 
-        return (id, title, year)
+    def create_genre_relationships(self, row):
+        movie_id = row[0]
+        genres = row[2].split("|")
+        with self.driver.session() as session:
+            for genre in genres:
+                session.run(
+                    """
+                    MATCH (m:Movie {id: $movie_id}), (g:Genre {name: $genre})
+                    MERGE (g)-[:IS_GENRE_OF]->(m)
+                    """,
+                    movie_id=movie_id, genre=genre
+                )
 
+    def load_ratings(self):
+        with open(RATINGS_PATH) as csvfile:
+            reader = csv.reader(csvfile)
+            next(reader, None)  # Skip header
+            for i, row in enumerate(reader):
+                self.create_user_node(row[0])
+                self.create_rating_relationship(row)
 
-def createGenreMovieRelationships(row):
-    movieId = row[0]
-    movieGenres = row[2].split("|")
+                if i % 100 == 0:
+                    print(f"{i}/{N_RATINGS} Rating relationships created")
+                if i >= N_RATINGS:
+                    break
 
-    for movieGenre in movieGenres:
-        graph.run('MATCH (g:Genre {name: {genre}}), (m:Movie {id: {movieId}}) CREATE (g)-[:IS_GENRE_OF]->(m)',
-            genre=movieGenre, movieId=movieId)
+    def create_user_node(self, user_id):
+        with self.driver.session() as session:
+            session.run("MERGE (u:User {id: $id})", id=f"User {user_id}")
 
-def parseRowGenreMovieRelationships(row):
-    movieId = row[0]
-    movieGenres = row[2].split("|")
+    def create_rating_relationship(self, row):
+        user_id = f"User {row[0]}"
+        movie_id = row[1]
+        rating = float(row[2])
+        timestamp = row[3]
+        with self.driver.session() as session:
+            session.run(
+                """
+                MATCH (u:User {id: $user_id}), (m:Movie {id: $movie_id})
+                MERGE (u)-[:RATED {rating: $rating, timestamp: $timestamp}]->(m)
+                """,
+                user_id=user_id, movie_id=movie_id, rating=rating, timestamp=timestamp
+            )
 
-    return (movieId, movieGenres)
+    def load_tags(self):
+        with open(TAGS_PATH) as csvfile:
+            reader = csv.reader(csvfile)
+            next(reader, None)  # Skip header
+            for i, row in enumerate(reader):
+                self.create_tag_relationship(row)
 
-def loadRatings():
-    with open('data/ratings.csv') as csvfile:
-         readCSV = csv.reader(csvfile, delimiter=',')
-         next(readCSV, None) #skip header
-         for i,row in enumerate(readCSV):
-             createUserNodes(row)
-             createRatingRelationship(row)
+                if i % 100 == 0:
+                    print(f"{i}/{N_TAGS} Tag relationships created")
+                if i >= N_TAGS:
+                    break
 
-             if (i % 100 == 0):
-                 print(f"{i}/{N_RATINGS} Rating relationships created")
+    def create_tag_relationship(self, row):
+        user_id = f"User {row[0]}"
+        movie_id = row[1]
+        tag = row[2]
+        timestamp = row[3]
+        with self.driver.session() as session:
+            session.run(
+                """
+                MATCH (u:User {id: $user_id}), (m:Movie {id: $movie_id})
+                MERGE (u)-[:TAGGED {tag: $tag, timestamp: $timestamp}]->(m)
+                """,
+                user_id=user_id, movie_id=movie_id, tag=tag, timestamp=timestamp
+            )
 
-             if (i >= N_RATINGS):
-                 break
+    def load_links(self):
+        with open(LINKS_PATH) as csvfile:
+            reader = csv.reader(csvfile)
+            next(reader, None)  # Skip header
+            for i, row in enumerate(reader):
+                self.update_movie_links(row)
 
-def createUserNodes(row):
-    user = Node("User", id="User " + row[0])
-    graph.merge(user, "User", "id")
+                if i % 100 == 0:
+                    print(f"{i}/{N_LINKS} Movie nodes updated with links")
+                if i >= N_LINKS:
+                    break
 
-def createRatingRelationship(row):
-    ratingData = parseRowRatingRelationships(row)
-
-    graph.run(
-        'MATCH (u:User {id: {userId}}), (m:Movie {id: {movieId}}) CREATE (u)-[:RATED { rating: {rating}, timestamp: {timestamp} }]->(m)',
-        userId=ratingData[0], movieId=ratingData[1], rating=ratingData[2], timestamp=ratingData[3])
-
-def parseRowRatingRelationships(row):
-    userId = "User " + row[0]
-    movieId = row[1]
-    rating = float(row[2])
-    timestamp = row[3]
-
-    return (userId, movieId, rating, timestamp)
-
-def loadTags():
-    with open('data/tags.csv') as csvfile:
-         readCSV = csv.reader(csvfile, delimiter=',')
-         next(readCSV, None) #skip header
-         for i,row in enumerate(readCSV):
-             createTagRelationship(row)
-
-             if (i % 100 == 0):
-                 print(f"{i}/{N_TAGS} Tag relationships created")
-
-             if (i >= N_TAGS):
-                 break
-
-def createTagRelationship(row):
-    tagData = parseRowTagRelationships(row)
-
-    graph.run(
-        'MATCH (u:User {id: {userId}}), (m:Movie {id: {movieId}}) CREATE (u)-[:TAGGED { tag: {tag}, timestamp: {timestamp} }]->(m)',
-        userId=tagData[0], movieId=tagData[1], tag=tagData[2], timestamp=tagData[3])
-
-def parseRowTagRelationships(row):
-    userId = "User " + row[0]
-    movieId = row[1]
-    tag = row[2]
-    timestamp = row[3]
-
-    return (userId, movieId, tag, timestamp)
-
-def loadLinks():
-    with open('data/links.csv') as csvfile:
-        readCSV = csv.reader(csvfile, delimiter=',')
-        next(readCSV, None)  # skip header
-        for i, row in enumerate(readCSV):
-
-            updateMovieNodeWithLinks(row)
-
-            if (i % 100 == 0):
-                print(f"{i}/{N_LINKS} Movie nodes updated with links")
-
-            # break after N_LINKS movies
-
-            if i >= N_LINKS:
-                break
-
-def updateMovieNodeWithLinks(row):
-    linkData = parseRowLinks(row)
-
-    graph.run(
-        'MATCH (m:Movie {id: {movieId}}) SET m += { imdbId: {imdbId} , tmdbId: {tmdbId} }',
-        movieId=linkData[0], imdbId=linkData[1], tmdbId=linkData[2])
-
-def parseRowLinks(row):
-    movieId = row[0]
-    imdbId = row[1]
-    tmdbId = row[2]
-
-    return (movieId, imdbId, tmdbId)
+    def update_movie_links(self, row):
+        movie_id = row[0]
+        imdb_id = row[1]
+        tmdb_id = row[2]
+        with self.driver.session() as session:
+            session.run(
+                """
+                MATCH (m:Movie {id: $movie_id})
+                SET m.imdbId = $imdb_id, m.tmdbId = $tmdb_id
+                """,
+                movie_id=movie_id, imdb_id=imdb_id, tmdb_id=tmdb_id
+            )
 
 
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    uri = f"bolt://{HOST}:{PORT}"
+    print(uri)
+    ingestion = Neo4jIngestion(uri, USER, PASS)
+    ingestion.create_genre_nodes()
+    ingestion.load_movies()
+    ingestion.load_ratings()
+    ingestion.load_tags()
+    ingestion.load_links()
+    ingestion.close()
